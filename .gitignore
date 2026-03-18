@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated output (chapter PDFs, text, audio)
+chapters/
+output/
+audio/
+text/
+*.mp3
+
+# OS
+.DS_Store
+Thumbs.db
