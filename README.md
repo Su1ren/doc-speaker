@@ -12,9 +12,10 @@ A command-line tool that splits a long PDF by chapters, extracts the text from e
 |---|---|
 | **Chapter detection** | Reads PDF bookmarks/outline first; falls back to heuristic pattern matching for Chinese (第N章/节/篇) and English (Chapter N, Part N, Section N) headings |
 | **PDF splitting** | Writes one PDF per detected chapter (or the whole document if no chapters are found) |
-| **Text extraction** | Extracts and cleans plain text from any PDF file |
-| **TTS synthesis** | Converts text to MP3 via edge-tts — no API key required; supports Chinese, English, Japanese, and [many other languages](https://learn.microsoft.com/azure/ai-services/speech-service/language-support) |
-| **Full pipeline** | One command to split → extract → synthesise all chapters |
+| **Markdown extraction** | Extracts Markdown (headings, bullet lists, detected tables) from any PDF file |
+| **LLM-ready prompts** | Builds prompts that tell the LLM to summarise tables, add SSML pauses, and keep an interview-coach tone |
+| **TTS synthesis** | Converts rewritten SSML to MP3 via edge-tts (default) or a locally hosted CosyVoice instance |
+| **Full pipeline** | One command to split → extract → prompt/LLM → synthesise all chapters |
 
 ---
 
@@ -41,10 +42,10 @@ pip install -r requirements.txt
 python main.py split reference.pdf -o chapters/
 ```
 
-### Extract plain text from a chapter (or any PDF)
+### Extract Markdown from a chapter (or any PDF)
 
 ```bash
-python main.py extract chapters/001_第一章_概述.pdf -o chapters/001.txt
+python main.py extract chapters/001_第一章_概述.pdf -o chapters/001.md
 # or print to stdout
 python main.py extract chapters/001_第一章_概述.pdf
 ```
@@ -62,10 +63,12 @@ python main.py speak chapters/001_第一章_概述.pdf -v zh-CN-YunxiNeural -r "
 python main.py speak chapters/001.txt -l en
 ```
 
-### Full pipeline — split, extract, and synthesise in one step
+### Full pipeline — split, extract Markdown, build prompts, and synthesise in one step
 
 ```bash
 python main.py pipeline reference.pdf -o output/
+# with automatic LLM rewrite (needs OPENAI_API_KEY) and CosyVoice TTS
+python main.py pipeline reference.pdf -o output/ --rewrite --tts-provider cosyvoice
 ```
 
 Output layout:
@@ -73,8 +76,10 @@ Output layout:
 ```
 output/
     chapters/   ← per-chapter PDF files
-    text/       ← plain-text counterparts
-    audio/      ← MP3 files ready to play
+    markdown/   ← Markdown counterparts
+    prompts/    ← ready-to-send prompts for LLM
+    scripts/    ← SSML output from the LLM when --rewrite is set
+    audio/      ← MP3 files ready to play (edge-tts by default, CosyVoice optional)
 ```
 
 Use `--text-only` to skip TTS (useful for large documents where you want to review the text first):
@@ -82,6 +87,17 @@ Use `--text-only` to skip TTS (useful for large documents where you want to revi
 ```bash
 python main.py pipeline reference.pdf -o output/ --text-only
 ```
+
+### LLM rewrite + SSML
+
+- The pipeline always writes ready-to-send prompts to `output/prompts/` that tell the LLM to summarise tables, add SSML pauses (`<break time="0.5s"/>`), and keep an interview-coach tone.
+- To auto-run the rewrite step, set `OPENAI_API_KEY` (optionally `OPENAI_MODEL` / `OPENAI_BASE_URL`) and add `--rewrite`. SSML scripts will be saved to `output/scripts/`.
+
+### CosyVoice TTS (optional)
+
+- Run a CosyVoice HTTP service locally and set `COSYVOICE_BASE_URL` (e.g. `http://localhost:8000`).
+- Switch the synthesiser with `--tts-provider cosyvoice`. The `--voice` flag is reused as the CosyVoice speaker name.
+- The adapter expects a `POST /tts` endpoint that returns audio bytes for the given SSML.
 
 ### List available TTS voices
 
@@ -124,10 +140,12 @@ doc-speaker/
 ├── requirements.txt
 ├── src/
 │   ├── pdf_splitter.py     ← chapter detection + PDF splitting
-│   ├── text_extractor.py   ← text extraction + cleaning
+│   ├── text_extractor.py   ← Markdown/text extraction helpers
+│   ├── prompt_builder.py   ← LLM prompt templates with SSML pacing
+│   ├── llm_rewriter.py     ← optional OpenAI-based rewrite helper
+│   ├── cosyvoice_adapter.py← CosyVoice HTTP client
 │   └── tts_reader.py       ← TTS synthesis via edge-tts
 └── tests/
     ├── test_pdf_splitter.py
     └── test_tts_reader.py
 ```
-

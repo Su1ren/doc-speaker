@@ -17,7 +17,15 @@ import fitz  # PyMuPDF
 import pytest
 
 from src.pdf_splitter import detect_chapters, split_pdf_by_chapters
-from src.text_extractor import _clean_text, extract_text, extract_text_to_file
+from src.text_extractor import (
+    _clean_text,
+    _table_to_markdown,
+    extract_markdown,
+    extract_markdown_to_file,
+    extract_text,
+    extract_text_to_file,
+    markdown_to_plaintext,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +243,39 @@ class TestExtractText:
         with open(out, encoding="utf-8") as fh:
             content = fh.read()
         assert isinstance(content, str)
+
+
+class TestExtractMarkdown:
+    def test_heading_and_list_rendered(self, tmp_path):
+        pdf = str(tmp_path / "m.pdf")
+        _make_pdf(pdf, [("Chapter 1 Intro", 16), ("• bullet item", 12)])
+        md = extract_markdown(pdf)
+        assert "## Chapter 1 Intro" in md
+        assert "- bullet item" in md
+
+    def test_markdown_file_written(self, tmp_path):
+        pdf = str(tmp_path / "m.pdf")
+        out = str(tmp_path / "out.md")
+        _make_pdf(pdf, [("内容", 12)], fontname="china-s")
+        path = extract_markdown_to_file(pdf, out)
+        assert path == out
+        assert os.path.isfile(out)
+        with open(out, encoding="utf-8") as fh:
+            assert "内容" in fh.read()
+
+    def test_markdown_to_plaintext(self):
+        md = "## 标题\n- **重点** 内容\n| A | B |\n| --- | --- |\n| 1 | 2 |"
+        text = markdown_to_plaintext(md)
+        assert "标题" in text
+        assert "重点 内容" in text
+        assert "|" not in text
+
+    def test_table_to_markdown_helper(self):
+        table = [["Col1", "Col2"], ["A", "B"]]
+        md = _table_to_markdown(table)
+        assert "| Col1 | Col2 |" in md
+        assert "---" in md
+        assert "| A | B |" in md
 
 
 # ---------------------------------------------------------------------------

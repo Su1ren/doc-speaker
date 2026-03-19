@@ -7,14 +7,14 @@ Usage examples
 # Split a 200-page PDF into per-chapter PDFs
 python main.py split reference.pdf -o chapters/
 
-# Extract plain text from one chapter
-python main.py extract chapters/001_第一章.pdf -o chapters/001.txt
+# Extract Markdown from one chapter
+python main.py extract chapters/001_第一章.pdf -o chapters/001.md
 
 # Convert a chapter PDF directly to speech
 python main.py speak chapters/001_第一章.pdf -l zh
 
-# One-shot pipeline: split → extract → TTS
-python main.py pipeline reference.pdf -o output/
+# One-shot pipeline: split → extract → prompt → TTS
+python main.py pipeline reference.pdf -o output/ --rewrite
 
 # List available TTS voices (filter to Chinese)
 python main.py list-voices -l zh
@@ -28,8 +28,23 @@ import click
 from tqdm import tqdm
 
 from src.pdf_splitter import detect_chapters, split_pdf_by_chapters
-from src.text_extractor import extract_text, extract_text_to_file
-from src.tts_reader import DEFAULT_VOICES, TTSServiceError, pdf_to_speech, text_to_speech
+from src.text_extractor import (
+    extract_markdown,
+    extract_markdown_to_file,
+    extract_text,
+    extract_text_to_file,
+    markdown_to_plaintext,
+)
+from src.tts_reader import (
+    DEFAULT_VOICES,
+    TTSServiceError,
+    _split_text,
+    pdf_to_speech,
+    text_to_speech,
+)
+from src.prompt_builder import build_speech_prompt
+from src.llm_rewriter import LLMConfigError, LLMServiceError, rewrite_with_openai
+from src.cosyvoice_adapter import CosyVoiceError, cosyvoice_tts
 
 
 @click.group()
@@ -90,17 +105,32 @@ def split(pdf_path: str, output_dir: str) -> None:
     is_flag=True,
     help="Skip whitespace normalisation.",
 )
-def extract(pdf_path: str, output: Optional[str], no_clean: bool) -> None:
-    """Extract plain text from PDF_PATH."""
+@click.option(
+    "-f", "--format",
+    "out_format",
+    type=click.Choice(["md", "text"]),
+    default="md",
+    show_default=True,
+    help="Extraction format (markdown or legacy plain text).",
+)
+def extract(pdf_path: str, output: Optional[str], no_clean: bool, out_format: str) -> None:
+    """Extract content from PDF_PATH as Markdown (default) or plain text."""
     if not os.path.exists(pdf_path):
         click.echo(f"Error: file not found – {pdf_path}", err=True)
         sys.exit(1)
 
-    if output:
-        extract_text_to_file(pdf_path, output, clean=not no_clean)
-        click.echo(f"Text saved to {output}")
+    if out_format == "md":
+        if output:
+            extract_markdown_to_file(pdf_path, output)
+            click.echo(f"Markdown saved to {output}")
+        else:
+            click.echo(extract_markdown(pdf_path))
     else:
-        click.echo(extract_text(pdf_path, clean=not no_clean))
+        if output:
+            extract_text_to_file(pdf_path, output, clean=not no_clean)
+            click.echo(f"Text saved to {output}")
+        else:
+            click.echo(extract_text(pdf_path, clean=not no_clean))
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +255,24 @@ def list_voices(lang: Optional[str]) -> None:
 @click.option("--max-chars", default=3000, show_default=True,
               help="Max characters per audio segment.")
 @click.option("--text-only", is_flag=True,
-              help="Stop after text extraction (skip TTS).")
+              help="Stop after markdown + prompt generation (skip TTS).")
+@click.option(
+    "--rewrite",
+    is_flag=True,
+    help="Use configured LLM to rewrite Markdown into SSML before TTS.",
+)
+@click.option(
+    "--llm-model",
+    default=None,
+    help="Model name for LLM rewrite (default: OPENAI_MODEL env or gpt-4o-mini).",
+)
+@click.option(
+    "--tts-provider",
+    type=click.Choice(["edge", "cosyvoice"]),
+    default="edge",
+    show_default=True,
+    help="TTS engine to use for the final audio.",
+)
 def pipeline(
     pdf_path: str,
     output_dir: str,
@@ -235,14 +282,19 @@ def pipeline(
     volume: str,
     max_chars: int,
     text_only: bool,
+    rewrite: bool,
+    llm_model: Optional[str],
+    tts_provider: str,
 ) -> None:
-    """Full pipeline: split PDF by chapters, extract text, synthesise speech.
+    """Full pipeline: split PDF by chapters, extract Markdown, build prompts, synthesise speech.
 
     Output layout::
 
         <output-dir>/
             chapters/   ← per-chapter PDF files
-            text/       ← plain-text counterparts
+            markdown/   ← Markdown counterparts
+            prompts/    ← LLM prompts ready to send
+            scripts/    ← LLM rewrite outputs (SSML) when --rewrite is used
             audio/      ← MP3 files (skipped with --text-only)
     """
     if not os.path.exists(pdf_path):
@@ -250,48 +302,105 @@ def pipeline(
         sys.exit(1)
 
     chapters_dir = os.path.join(output_dir, "chapters")
-    text_dir = os.path.join(output_dir, "text")
+    markdown_dir = os.path.join(output_dir, "markdown")
+    prompts_dir = os.path.join(output_dir, "prompts")
+    scripts_dir = os.path.join(output_dir, "scripts")
     audio_dir = os.path.join(output_dir, "audio")
 
     # -- Step 1: split -------------------------------------------------------
-    click.echo("[1/3] Detecting chapters and splitting PDF …")
+    click.echo("[1/4] Detecting chapters and splitting PDF …")
     chapter_files = split_pdf_by_chapters(pdf_path, chapters_dir)
     click.echo(f"      {len(chapter_files)} chapter file(s) → {chapters_dir}/")
 
-    # -- Step 2: extract text ------------------------------------------------
-    click.echo("[2/3] Extracting text …")
-    os.makedirs(text_dir, exist_ok=True)
-    text_files = []
+    # -- Step 2: extract Markdown -------------------------------------------
+    click.echo("[2/4] Extracting Markdown …")
+    os.makedirs(markdown_dir, exist_ok=True)
+    md_files = []
     for cf in tqdm(chapter_files, desc="  extract", unit="file"):
         base = os.path.splitext(os.path.basename(cf))[0]
-        txt_path = os.path.join(text_dir, f"{base}.txt")
-        extract_text_to_file(cf, txt_path)
-        text_files.append(txt_path)
-    click.echo(f"      {len(text_files)} text file(s) → {text_dir}/")
+        md_path = os.path.join(markdown_dir, f"{base}.md")
+        extract_markdown_to_file(cf, md_path)
+        md_files.append(md_path)
+    click.echo(f"      {len(md_files)} markdown file(s) → {markdown_dir}/")
+
+    # -- Step 3: build prompts / rewrite ------------------------------------
+    click.echo("[3/4] Building LLM prompts …")
+    os.makedirs(prompts_dir, exist_ok=True)
+    os.makedirs(scripts_dir, exist_ok=True)
+    script_files = []
+    for md_file in tqdm(md_files, desc="  prompt", unit="file"):
+        with open(md_file, encoding="utf-8") as fh:
+            md_content = fh.read()
+
+        prompt_text = build_speech_prompt(md_content, locale=lang)
+        prompt_path = os.path.join(prompts_dir, os.path.basename(md_file))
+        with open(prompt_path, "w", encoding="utf-8") as fh:
+            fh.write(prompt_text)
+
+        if rewrite:
+            try:
+                script_text = rewrite_with_openai(
+                    md_content, model=llm_model, locale=lang
+                )
+            except (LLMConfigError, LLMServiceError) as exc:
+                click.echo(f"LLM rewrite failed for {md_file}: {exc}", err=True)
+                sys.exit(1)
+
+            script_path = os.path.join(
+                scripts_dir, f"{os.path.splitext(os.path.basename(md_file))[0]}.ssml"
+            )
+            with open(script_path, "w", encoding="utf-8") as fh:
+                fh.write(script_text)
+            script_files.append(script_path)
+    click.echo(f"      Prompts → {prompts_dir}/")
+    if rewrite:
+        click.echo(f"      {len(script_files)} SSML script(s) → {scripts_dir}/")
 
     if text_only:
         click.echo("Done (--text-only).")
         return
 
-    # -- Step 3: TTS ---------------------------------------------------------
-    click.echo("[3/3] Synthesising speech …")
+    # -- Step 4: TTS ---------------------------------------------------------
+    click.echo("[4/4] Synthesising speech …")
     os.makedirs(audio_dir, exist_ok=True)
     audio_files = []
-    for tf in tqdm(text_files, desc="  TTS  ", unit="file"):
-        with open(tf, encoding="utf-8") as fh:
-            text = fh.read()
-        if not text.strip():
+    sources = script_files if script_files else md_files
+
+    for source in tqdm(sources, desc="  TTS  ", unit="file"):
+        with open(source, encoding="utf-8") as fh:
+            content = fh.read()
+        if not content.strip():
             continue
-        base = os.path.splitext(os.path.basename(tf))[0]
-        audio_path = os.path.join(audio_dir, f"{base}.mp3")
-        try:
-            generated = text_to_speech(
-                text, audio_path, voice=voice, lang=lang, rate=rate, volume=volume
-            )
-            audio_files.append(generated)
-        except TTSServiceError as exc:
-            click.echo(f"TTS service error while processing {tf}: {exc}", err=True)
-            sys.exit(1)
+
+        if script_files:
+            speak_text = content
+        else:
+            speak_text = markdown_to_plaintext(content)
+
+        chunks = _split_text(speak_text, max_chars)
+        base_name = os.path.splitext(os.path.basename(source))[0]
+
+        for i, chunk in enumerate(chunks, start=1):
+            suffix = ".mp3" if len(chunks) == 1 else f"_part{i:03d}.mp3"
+            audio_path = os.path.join(audio_dir, f"{base_name}{suffix}")
+
+            if tts_provider == "edge":
+                try:
+                    generated = text_to_speech(
+                        chunk, audio_path, voice=voice, lang=lang, rate=rate, volume=volume
+                    )
+                    audio_files.append(generated)
+                except TTSServiceError as exc:
+                    click.echo(f"TTS service error while processing {source}: {exc}", err=True)
+                    sys.exit(1)
+            else:
+                ssml_chunk = chunk if "<speak" in chunk else f"<speak>{chunk}</speak>"
+                try:
+                    generated = cosyvoice_tts(ssml_chunk, audio_path, speaker=voice or "cosyvoice")
+                    audio_files.append(generated)
+                except CosyVoiceError as exc:
+                    click.echo(f"CosyVoice error while processing {source}: {exc}", err=True)
+                    sys.exit(1)
     click.echo(f"      {len(audio_files)} audio file(s) → {audio_dir}/")
 
     click.echo("Pipeline complete!")
