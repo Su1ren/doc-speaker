@@ -122,13 +122,14 @@ def pdf_to_speech(
     Returns:
         List of generated MP3 file paths.
     """
-    from src.text_extractor import extract_text  # local import avoids cycles
+    from src.text_extractor import extract_markdown, markdown_to_plaintext  # local import avoids cycles
 
-    text = extract_text(pdf_path)
-    if not text:
+    markdown = extract_markdown(pdf_path)
+    plain_text = markdown_to_plaintext(markdown)
+    if not plain_text:
         return []
 
-    chunks = _split_text(text, max_chars)
+    chunks = _split_text(plain_text, max_chars)
     base = os.path.splitext(output_path)[0]
     output_files: List[str] = []
 
