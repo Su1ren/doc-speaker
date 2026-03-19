@@ -29,7 +29,7 @@ from tqdm import tqdm
 
 from src.pdf_splitter import detect_chapters, split_pdf_by_chapters
 from src.text_extractor import extract_text, extract_text_to_file
-from src.tts_reader import DEFAULT_VOICES, pdf_to_speech, text_to_speech
+from src.tts_reader import DEFAULT_VOICES, TTSServiceError, pdf_to_speech, text_to_speech
 
 
 @click.group()
@@ -151,17 +151,21 @@ def speak(
 
     click.echo(f"Converting {input_path} to speech …")
 
-    if input_path.lower().endswith(".pdf"):
-        files = pdf_to_speech(
-            input_path, output,
-            voice=voice, lang=lang, rate=rate, volume=volume,
-            max_chars=max_chars,
-        )
-    else:
-        with open(input_path, encoding="utf-8") as fh:
-            text = fh.read()
-        files = [text_to_speech(text, output, voice=voice, lang=lang,
-                                rate=rate, volume=volume)]
+    try:
+        if input_path.lower().endswith(".pdf"):
+            files = pdf_to_speech(
+                input_path, output,
+                voice=voice, lang=lang, rate=rate, volume=volume,
+                max_chars=max_chars,
+            )
+        else:
+            with open(input_path, encoding="utf-8") as fh:
+                text = fh.read()
+            files = [text_to_speech(text, output, voice=voice, lang=lang,
+                                    rate=rate, volume=volume)]
+    except TTSServiceError as exc:
+        click.echo(f"TTS service error: {exc}", err=True)
+        sys.exit(1)
 
     click.echo(f"Done – generated {len(files)} audio file(s):")
     for f in files:
@@ -280,10 +284,14 @@ def pipeline(
             continue
         base = os.path.splitext(os.path.basename(tf))[0]
         audio_path = os.path.join(audio_dir, f"{base}.mp3")
-        generated = text_to_speech(
-            text, audio_path, voice=voice, lang=lang, rate=rate, volume=volume
-        )
-        audio_files.append(generated)
+        try:
+            generated = text_to_speech(
+                text, audio_path, voice=voice, lang=lang, rate=rate, volume=volume
+            )
+            audio_files.append(generated)
+        except TTSServiceError as exc:
+            click.echo(f"TTS service error while processing {tf}: {exc}", err=True)
+            sys.exit(1)
     click.echo(f"      {len(audio_files)} audio file(s) → {audio_dir}/")
 
     click.echo("Pipeline complete!")

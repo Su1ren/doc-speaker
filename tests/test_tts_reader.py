@@ -3,6 +3,14 @@ Unit tests for tts_reader.py helper functions that do NOT require
 a network connection (edge-tts API calls are not exercised here).
 """
 
+import os
+import sys
+
+# Allow running this file directly (python tests/test_tts_reader.py).
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from src.tts_reader import _split_text
 
 

@@ -13,6 +13,10 @@ from typing import List, Optional
 
 import edge_tts
 
+
+class TTSServiceError(RuntimeError):
+    """Raised when the remote TTS service rejects the synthesis request."""
+
 # ---------------------------------------------------------------------------
 # Default voice map – keyed by lowercase language code prefix.
 # Run `python -m edge_tts --list-voices` to see all available voices.
@@ -71,13 +75,22 @@ def text_to_speech(
     Returns:
         The *output_path* that was written.
     """
-    if voice is None:
-        voice = DEFAULT_VOICES.get(lang.lower(), DEFAULT_VOICES["zh"])
+    resolved_voice = voice if voice is not None else DEFAULT_VOICES.get(
+        lang.lower(), DEFAULT_VOICES["zh"]
+    )
 
     out_dir = os.path.dirname(os.path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
 
-    asyncio.run(_synthesise(text, output_path, voice, rate, volume))
+    try:
+        asyncio.run(_synthesise(text, output_path, resolved_voice, rate, volume))
+    except Exception as exc:
+        if exc.__class__.__name__ == "WSServerHandshakeError" and getattr(exc, "status", None) == 403:
+            raise TTSServiceError(
+                "edge-tts handshake was rejected (HTTP 403). "
+                "Please upgrade edge-tts to >=7.2.7 and check your network/proxy access to speech.platform.bing.com."
+            ) from exc
+        raise
     return output_path
 
 

@@ -1,5 +1,5 @@
-PyMuPDF==1.24.3
-edge-tts==6.1.12
+PyMuPDF>=1.24.3
+edge-tts>=7.2.7
 click==8.1.7
 tqdm==4.66.4
 pytest==8.2.2
